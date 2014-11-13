@@ -1,13 +1,22 @@
 package com.sharethis.userProfile.model;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileReader;
 import java.util.HashMap;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
+import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.log4j.Logger;
 
-public class UserProfileModelData {
+import java.nio.ByteBuffer;
+
+public class UserProfileModelData extends Thread {
 	private static final String model_file = "data/model.txt";
+	private static final String model_status_file = "data/_SUCCESS";
 	private static final Logger log = Logger.getLogger(UserProfileModelData.class);
 	
 	/* Features in an array of string arrays*/
@@ -199,10 +208,34 @@ public class UserProfileModelData {
 		HM_HOUR_GROUP.put("06", "4");
 	};
 	
-	private static HashMap<String, Double> HM_MODEL_DATA;
+	private AtomicReference<HashMap<ByteBuffer, Double>> HM_MODEL_REF_USE;
+	private AtomicLong model_file_last_modified;	// Model last modified time stamp
+	private Timer timer;	// For periodically upload new model file
 	
-	public UserProfileModelData () {
-		HM_MODEL_DATA = new HashMap<String, Double>();
+	private void loadModel(boolean forced) {
+		File f_model_status = new File(model_status_file);
+		if (!f_model_status.exists() || !f_model_status.isFile()) {
+			log.error("Model status file " + model_status_file + " is not ready.");
+			return;
+		}
+		
+		File f_model = new File(model_file);
+		if (f_model.length() == 0) {
+			log.error("Model file " + model_file + " is empty.");
+			return;
+		}
+		else {
+			if (!forced && f_model.lastModified() == model_file_last_modified.get()) {
+				log.warn("Model file " + model_file + " is not updated. Will not update the model.");
+				return;
+			}
+			else {
+				log.warn("Model file " + model_file + " updated (old: " + model_file_last_modified.get() + " | new: " + f_model.lastModified() + ")");
+				model_file_last_modified.set(f_model.lastModified());
+			}
+		}
+		
+		HashMap<ByteBuffer, Double> HM_MODEL_DATA = new HashMap<ByteBuffer, Double>();
 		try {
 			BufferedReader input = new BufferedReader(new FileReader(model_file));
 			String line = null;
@@ -214,14 +247,40 @@ public class UserProfileModelData {
 					double imp = Double.parseDouble(tokens[5]);
 					double conv = Double.parseDouble(tokens[6]);
 					double ctr = imp > 0 ? (conv + 0.1) / (imp + 1000.0) : 0.0;
-					HM_MODEL_DATA.put(key, new Double(ctr));
+					byte[] b_key = DigestUtils.md5(key);
+					HM_MODEL_DATA.put(ByteBuffer.wrap(b_key), new Double(ctr));
 				}
 			}
 			input.close();
+			HM_MODEL_REF_USE.set(HM_MODEL_DATA);
 			log.info("Model loaded from file: " + model_file);
 		} catch (Exception e) {
 			log.error("Cannot open model file: " + model_file);
 		}
+	}
+	
+	public UserProfileModelData () {
+		HM_MODEL_REF_USE = new AtomicReference<HashMap<ByteBuffer, Double>>(new HashMap<ByteBuffer, Double>());
+		model_file_last_modified = new AtomicLong(0);
+		timer = new Timer();
+		loadModel(true);
+	}
+	
+	protected void finalize() throws Throwable {
+		timer.purge();
+		timer.cancel();
+	}
+	
+	public void run() {
+		// Periodically check the model file
+		TimerTask task = new TimerTask() {
+			@Override
+			public void run() {
+				loadModel(false);
+			}
+		};
+		if (task != null)
+			timer.schedule(task, 2000, 2000);
 	}
 	
 	/* Get feature values*/
@@ -230,12 +289,14 @@ public class UserProfileModelData {
 	}
 	
 	public boolean has_key(String key) {
-		return HM_MODEL_DATA.containsKey(key);
+		byte[] b_key = DigestUtils.md5(key);
+		return HM_MODEL_REF_USE.get().containsKey(ByteBuffer.wrap(b_key));
 	}
 	
 	public float get_score(String key) {
-		if (HM_MODEL_DATA.containsKey(key))
-			return HM_MODEL_DATA.get(key).floatValue();
+		byte[] b_key = DigestUtils.md5(key);
+		if (HM_MODEL_REF_USE.get().containsKey(ByteBuffer.wrap(b_key)))
+			return HM_MODEL_REF_USE.get().get(ByteBuffer.wrap(b_key)).floatValue();
 		else
 			return 0.0f;
 	}

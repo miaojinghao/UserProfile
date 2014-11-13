@@ -10,6 +10,7 @@ public class UserProfileModelInterface {
 	
 	public UserProfileModelInterface() {
 		upm = new UserProfileModelData();
+		upm.start();
 	}
 	
 	public String[] getNames() { 
